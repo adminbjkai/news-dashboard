@@ -16,11 +16,13 @@ import {
   type ScheduledJobRun,
 } from '../api';
 import { relativeCountdown } from '../lib/format';
+import { ArticleRetentionCard } from '../components/scheduler/ArticleRetentionCard';
 
 const JOB_LABELS: Record<string, string> = {
   digest: 'Daily digest',
   recommendations: 'Recommendations',
   analytics_retention: 'Analytics retention',
+  article_retention: 'Article retention',
   per_user_briefings: 'Per-user briefings',
   briefing: 'Global briefing',
   embedding_dedup: 'Duplicate cleanup',
@@ -233,6 +235,8 @@ export function SchedulerPage() {
           </div>
         )}
       </div>
+
+      <ArticleRetentionCard onCleanup={loadJobRuns} />
 
       <div className="rounded-lg border border-border p-4">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">

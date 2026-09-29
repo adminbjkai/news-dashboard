@@ -99,6 +99,14 @@ def _run_analytics_retention() -> tuple[str, str | None]:
         return "failure", str(exc)[:500]
 
 
+def _run_article_retention() -> tuple[str, str | None]:
+    from news_dashboard.scheduler.retention import cleanup_old_articles
+
+    result = cleanup_old_articles()
+    logger.info("Article retention: %s", result.message)
+    return result.status, result.message
+
+
 def _run_embedding_dedup() -> tuple[str, str | None]:
     from news_dashboard.embedding_dedup import run_embedding_dedup
 
@@ -619,6 +627,28 @@ def run_embedding_dedup_now() -> dict[str, int | str]:
     return {"status": status, "embedded": embedded, "merged": merged}
 
 
+def run_article_retention_now() -> dict[str, Any]:
+    """Run article cleanup immediately and record it in scheduled-job history."""
+    from news_dashboard.scheduler.retention import CleanupResult, cleanup_old_articles
+
+    result: CleanupResult | None = None
+
+    def cleanup_and_summarize() -> tuple[str, str]:
+        nonlocal result
+        result = cleanup_old_articles()
+        return result.status, result.message
+
+    _run_and_record(
+        "article_retention",
+        cleanup_and_summarize,
+        raise_on_failure=True,
+    )
+    if result is None:  # pragma: no cover - _run_and_record either returns or raises
+        message = "article retention cleanup produced no result"
+        raise RuntimeError(message)
+    return result.as_dict()
+
+
 def _job_digest() -> None:
     _run_and_record("digest", _run_digest)
 
@@ -629,6 +659,10 @@ def _job_daily_recommendations() -> None:
 
 def _job_analytics_retention() -> None:
     _run_and_record("analytics_retention", _run_analytics_retention)
+
+
+def _job_article_retention() -> None:
+    _run_and_record("article_retention", _run_article_retention)
 
 
 def _job_briefing() -> None:
@@ -870,6 +904,15 @@ def start_scheduler() -> None:
         hour="3",
         minute="0",
         id="analytics_retention",
+        replace_existing=True,
+    )
+
+    scheduler.add_job(
+        _job_article_retention,
+        trigger="cron",
+        hour="3",
+        minute="30",
+        id="article_retention",
         replace_existing=True,
     )
 

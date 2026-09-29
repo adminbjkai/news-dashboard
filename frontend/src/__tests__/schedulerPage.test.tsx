@@ -11,6 +11,9 @@ const apiMock = vi.hoisted(() => ({
   resumeScheduler: vi.fn(),
   ingestNow: vi.fn(),
   runEmbeddingDedup: vi.fn(),
+  fetchArticleRetention: vi.fn(),
+  updateArticleRetention: vi.fn(),
+  runArticleRetention: vi.fn(),
 }));
 vi.mock('../api', () => apiMock);
 
@@ -35,6 +38,35 @@ beforeEach(() => {
   apiMock.fetchSchedulerStatus.mockResolvedValue(defaultStatus);
   apiMock.fetchLatestJobRuns.mockResolvedValue([]);
   apiMock.runEmbeddingDedup.mockResolvedValue({ status: 'success', embedded: 0, merged: 0 });
+  apiMock.fetchArticleRetention.mockResolvedValue({
+    days: null,
+    schedule: '03:30 UTC daily',
+    preview: {
+      enabled: false,
+      retention_days: null,
+      eligible_articles: 0,
+      protected_articles: 0,
+      estimated_payload_bytes: 0,
+    },
+  });
+  apiMock.updateArticleRetention.mockImplementation(async (days: number | null) => ({
+    days,
+    schedule: '03:30 UTC daily',
+    preview: {
+      enabled: days !== null,
+      retention_days: days,
+      eligible_articles: 0,
+      protected_articles: 0,
+      estimated_payload_bytes: 0,
+    },
+  }));
+  apiMock.runArticleRetention.mockResolvedValue({
+    status: 'success',
+    deleted_articles: 3,
+    protected_articles: 0,
+    estimated_deleted_payload_bytes: 2048,
+    message: 'deleted 3 articles older than 30 days',
+  });
 });
 
 afterEach(() => {
@@ -129,6 +161,25 @@ describe('SchedulerPage — job outcomes section', () => {
     expect(screen.getByText('Analytics retention')).toBeTruthy();
     expect(screen.getByText('pruned 42 events older than 90 days')).toBeTruthy();
   });
+
+  it('labels article retention outcomes', async () => {
+    apiMock.fetchLatestJobRuns.mockResolvedValue([
+      {
+        id: 4,
+        job_name: 'article_retention',
+        started_at: '2026-09-29T03:30:00Z',
+        finished_at: '2026-09-29T03:30:01Z',
+        duration_ms: 900,
+        status: 'success',
+        message: 'deleted 12 articles older than 90 days',
+      },
+    ]);
+
+    render(<SchedulerPage />);
+
+    expect((await screen.findAllByText('Article retention')).length).toBe(2);
+    expect(screen.getByText('deleted 12 articles older than 90 days')).toBeTruthy();
+  });
 });
 
 describe('SchedulerPage — manual duplicate cleanup', () => {
@@ -165,5 +216,153 @@ describe('SchedulerPage — manual duplicate cleanup', () => {
     await userEvent.click(await screen.findByRole('button', { name: '↻ Fetch now' }));
 
     expect(screen.getByRole('button', { name: 'Remove duplicates' })).not.toBeDisabled();
+  });
+});
+
+describe('SchedulerPage — article retention', () => {
+  it('defaults to keep forever and disables manual cleanup', async () => {
+    render(<SchedulerPage />);
+
+    expect(await screen.findByRole('heading', { name: 'Article retention' })).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Retention policy' })).toHaveValue('forever');
+    expect(screen.getByRole('button', { name: 'Run cleanup now' })).toBeDisabled();
+    expect(screen.getByText('03:30 UTC daily')).toBeTruthy();
+  });
+
+  it('saves numeric retention without running cleanup', async () => {
+    render(<SchedulerPage />);
+    await screen.findByRole('heading', { name: 'Article retention' });
+
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Retention policy' }),
+      'custom'
+    );
+    await userEvent.type(screen.getByRole('spinbutton', { name: 'Retention days' }), '90');
+    await userEvent.click(screen.getByRole('button', { name: 'Save retention' }));
+
+    await waitFor(() => expect(apiMock.updateArticleRetention).toHaveBeenCalledWith(90));
+    expect(apiMock.runArticleRetention).not.toHaveBeenCalled();
+  });
+
+  it('parses scientific notation without truncating it', async () => {
+    render(<SchedulerPage />);
+    await screen.findByRole('heading', { name: 'Article retention' });
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Retention policy' }),
+      'custom'
+    );
+    await userEvent.type(screen.getByRole('spinbutton', { name: 'Retention days' }), '1e3');
+    await userEvent.click(screen.getByRole('button', { name: 'Save retention' }));
+
+    await waitFor(() => expect(apiMock.updateArticleRetention).toHaveBeenCalledWith(1000));
+  });
+
+  it('rejects fractional retention values', async () => {
+    render(<SchedulerPage />);
+    await screen.findByRole('heading', { name: 'Article retention' });
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Retention policy' }),
+      'custom'
+    );
+    await userEvent.type(screen.getByRole('spinbutton', { name: 'Retention days' }), '30.9');
+    await userEvent.click(screen.getByRole('button', { name: 'Save retention' }));
+
+    expect(apiMock.updateArticleRetention).not.toHaveBeenCalled();
+    expect(screen.getByText(/whole number/i)).toBeTruthy();
+  });
+
+  it('shows eligible and protected preview counts', async () => {
+    apiMock.fetchArticleRetention.mockResolvedValue({
+      days: 30,
+      schedule: '03:30 UTC daily',
+      preview: {
+        enabled: true,
+        retention_days: 30,
+        eligible_articles: 12,
+        protected_articles: 4,
+        estimated_payload_bytes: 4096,
+      },
+    });
+    render(<SchedulerPage />);
+
+    expect(await screen.findByText('12 eligible')).toBeTruthy();
+    expect(screen.getByText('4 protected')).toBeTruthy();
+    expect(screen.getByText('4 KB estimated payload')).toBeTruthy();
+  });
+
+  it('requires confirmation and supports cancelling cleanup', async () => {
+    apiMock.fetchArticleRetention.mockResolvedValue({
+      days: 30,
+      schedule: '03:30 UTC daily',
+      preview: {
+        enabled: true,
+        retention_days: 30,
+        eligible_articles: 12,
+        protected_articles: 4,
+        estimated_payload_bytes: 4096,
+      },
+    });
+    render(<SchedulerPage />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Run cleanup now' }));
+
+    expect(screen.getByRole('dialog')).toBeTruthy();
+    expect(screen.getByText(/permanently delete 12 eligible articles/i)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(apiMock.runArticleRetention).not.toHaveBeenCalled();
+  });
+
+  it('runs confirmed cleanup and refreshes policy and history', async () => {
+    apiMock.fetchArticleRetention.mockResolvedValue({
+      days: 30,
+      schedule: '03:30 UTC daily',
+      preview: {
+        enabled: true,
+        retention_days: 30,
+        eligible_articles: 3,
+        protected_articles: 0,
+        estimated_payload_bytes: 2048,
+      },
+    });
+    render(<SchedulerPage />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Run cleanup now' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm cleanup' }));
+
+    await waitFor(() => expect(apiMock.runArticleRetention).toHaveBeenCalledOnce());
+    expect(apiMock.fetchArticleRetention).toHaveBeenCalledTimes(2);
+    expect(apiMock.fetchLatestJobRuns).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows the reason when cleanup is skipped', async () => {
+    apiMock.fetchArticleRetention.mockResolvedValue({
+      days: 30,
+      schedule: '03:30 UTC daily',
+      preview: {
+        enabled: true,
+        retention_days: 30,
+        eligible_articles: 0,
+        protected_articles: 0,
+        estimated_payload_bytes: 0,
+      },
+    });
+    apiMock.runArticleRetention.mockResolvedValue({
+      status: 'skipped',
+      deleted_articles: 0,
+      protected_articles: 0,
+      estimated_deleted_payload_bytes: 0,
+      message: 'cleanup already running',
+    });
+    render(<SchedulerPage />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Run cleanup now' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm cleanup' }));
+
+    expect(await screen.findByText('cleanup already running')).toBeTruthy();
+  });
+
+  it('shows retention loading failures without hiding scheduler controls', async () => {
+    apiMock.fetchArticleRetention.mockRejectedValue(new Error('retention unavailable'));
+    render(<SchedulerPage />);
+
+    expect(await screen.findByText('retention unavailable')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '↻ Fetch now' })).toBeTruthy();
   });
 });

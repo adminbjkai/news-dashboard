@@ -15,11 +15,15 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from news_dashboard.briefings.service import BriefingAINotConfiguredError, BriefingGenerationError
+from news_dashboard.scheduler.retention import CleanupResult
 from news_dashboard.scheduler.service import (
+    _job_article_retention,
+    _run_article_retention,
     _run_briefing,
     _run_per_user_briefings,
     _run_weekly_lesson_recaps,
     _run_weekly_recaps,
+    run_article_retention_now,
     run_embedding_dedup_now,
 )
 
@@ -156,6 +160,62 @@ def test_run_embedding_dedup_now_records_failure_and_raises() -> None:
     assert save_job_run.call_args.kwargs["job_name"] == "embedding_dedup"
     assert save_job_run.call_args.kwargs["status"] == "failure"
     assert save_job_run.call_args.kwargs["message"] == "embedding service unavailable"
+
+
+def test_run_article_retention_now_records_history_and_returns_summary() -> None:
+    summary = CleanupResult("success", 30, 4, 2, 1024, "deleted 4 articles")
+    with (
+        patch("news_dashboard.scheduler.retention.cleanup_old_articles", return_value=summary),
+        patch("news_dashboard.scheduled_job_history.save_job_run") as save_job_run,
+    ):
+        result = run_article_retention_now()
+
+    assert result == summary.as_dict()
+    assert save_job_run.call_args.kwargs["job_name"] == "article_retention"
+    assert save_job_run.call_args.kwargs["status"] == "success"
+
+
+def test_run_article_retention_now_records_cleanup_failure() -> None:
+    with (
+        patch(
+            "news_dashboard.scheduler.retention.cleanup_old_articles",
+            side_effect=RuntimeError("retention database unavailable"),
+        ),
+        patch("news_dashboard.scheduled_job_history.save_job_run") as save_job_run,
+        pytest.raises(RuntimeError, match="retention database unavailable"),
+    ):
+        run_article_retention_now()
+
+    save_job_run.assert_called_once()
+    assert save_job_run.call_args.kwargs["job_name"] == "article_retention"
+    assert save_job_run.call_args.kwargs["status"] == "failure"
+
+
+def test_run_article_retention_reports_disabled_policy_as_skipped() -> None:
+    result = CleanupResult("skipped", None, 0, 0, 0, "retention disabled")
+    with patch("news_dashboard.scheduler.retention.cleanup_old_articles", return_value=result):
+        assert _run_article_retention() == ("skipped", "retention disabled")
+
+
+def test_run_article_retention_reports_success_summary() -> None:
+    result = CleanupResult("success", 30, 4, 2, 1024, "deleted 4 articles")
+    with patch("news_dashboard.scheduler.retention.cleanup_old_articles", return_value=result):
+        assert _run_article_retention() == ("success", "deleted 4 articles")
+
+
+def test_article_retention_job_records_cleanup_failure() -> None:
+    with (
+        patch(
+            "news_dashboard.scheduler.retention.cleanup_old_articles",
+            side_effect=RuntimeError("database unavailable"),
+        ),
+        patch("news_dashboard.scheduled_job_history.save_job_run") as save_job_run,
+    ):
+        _job_article_retention()
+
+    assert save_job_run.call_args.kwargs["job_name"] == "article_retention"
+    assert save_job_run.call_args.kwargs["status"] == "failure"
+    assert save_job_run.call_args.kwargs["message"] == "database unavailable"
 
 
 # ── _run_per_user_briefings ──────────────────────────────────────────────────
@@ -756,6 +816,19 @@ def test_start_scheduler_registers_analytics_retention_job(
     assert retention_call.kwargs["trigger"] == "cron"
     assert retention_call.kwargs["hour"] == "3"
     assert retention_call.kwargs["minute"] == "0"
+
+
+def test_start_scheduler_registers_article_retention_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mock_sched = _start_with_env(monkeypatch)
+    retention_call = next(
+        c for c in mock_sched.add_job.call_args_list if c.kwargs.get("id") == "article_retention"
+    )
+    assert retention_call.args[0] is _job_article_retention
+    assert retention_call.kwargs["trigger"] == "cron"
+    assert retention_call.kwargs["hour"] == "3"
+    assert retention_call.kwargs["minute"] == "30"
 
 
 def test_start_scheduler_briefing_fn_is_job_briefing(monkeypatch: pytest.MonkeyPatch) -> None:

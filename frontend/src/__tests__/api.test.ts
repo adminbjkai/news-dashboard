@@ -470,9 +470,38 @@ describe('scheduler endpoints', () => {
     expect(calls[0].init?.method).toBe('POST');
     expect(result).toEqual({ status: 'success', embedded: 4, merged: 2 });
   });
+
+  it('fetchArticleRetention gets the saved policy', async () => {
+    const { calls } = stubFetch(() => jsonOk({ days: null, schedule: '03:30 UTC daily' }));
+    expect((await api.fetchArticleRetention()).days).toBeNull();
+    expect(calls[0].url).toBe('/api/scheduler/article-retention');
+  });
+
+  it.each([null, 90])('updateArticleRetention PUTs days=%s', async (days) => {
+    const { calls } = stubFetch(() => jsonOk({ days, schedule: '03:30 UTC daily' }));
+    await api.updateArticleRetention(days);
+    expect(calls[0].url).toBe('/api/scheduler/article-retention');
+    expect(calls[0].init?.method).toBe('PUT');
+    expect(calls[0].init?.body).toBe(JSON.stringify({ days }));
+  });
+
+  it('runArticleRetention POSTs to the manual cleanup endpoint', async () => {
+    const { calls } = stubFetch(() => jsonOk({ status: 'success', deleted_articles: 3 }));
+    expect((await api.runArticleRetention()).deleted_articles).toBe(3);
+    expect(calls[0].url).toBe('/api/scheduler/article-retention/run');
+    expect(calls[0].init?.method).toBe('POST');
+  });
 });
 
 describe('stats endpoints', () => {
+  it('fetchDatasetStats sends the selected range', async () => {
+    const payload = { summary: { article_count: 12 }, trend: [] };
+    const { calls } = stubFetch(() => jsonOk(payload));
+
+    expect(await api.fetchDatasetStats('1y')).toEqual(payload);
+    expect(calls[0].url).toBe('/api/stats/dataset?range=1y');
+  });
+
   it('fetchStatsOverview passes from/to', async () => {
     const { calls } = stubFetch(() => jsonOk({ total: 1 }));
     await api.fetchStatsOverview('2026-01-01', '2026-02-01');
